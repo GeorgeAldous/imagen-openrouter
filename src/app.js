@@ -295,6 +295,8 @@ function deriveModelConfig(model) {
 
     const config = {
         name: model.name || model.id,
+        modalities: outputModalities.length ? outputModalities : ['image'],
+        imageOnly: outputModalities.includes('image') && !outputModalities.includes('text'),
         // Only Gemini currently accepts an explicit image size / resolution.
         supportsImageSize: model.id.includes('gemini'),
         supportsAspectRatio: true,
@@ -1277,7 +1279,63 @@ async function generateImages() {
  *   taken when Generate was pressed. Jobs wait in a pool, so reading live
  *   state here would send settings the user changed after pressing Generate.
  */
+// Image-only models (FLUX, Seedream, ...) reject the chat/completions
+// endpoint; OpenRouter routes them through POST /api/v1/images instead.
+// Multimodal models (Gemini, GPT Image, ...) stay on chat/completions.
+async function generateImageOnly(prompt, modelId, modelConfig, settings, meta = {}) {
+    const requestBody = {
+        model: modelId,
+        prompt: prompt,
+        aspect_ratio: settings.aspectRatio
+    };
+    if (modelConfig.supportsImageSize) {
+        requestBody.resolution = settings.quality.toUpperCase();
+    }
+    if (modelConfig.supportsImageInput && settings.references && settings.references.length) {
+        requestBody.input_references = settings.references.filter(Boolean).map(url => ({
+            type: 'image_url',
+            image_url: { url: url }
+        }));
+    }
+
+    const response = await fetch('https://openrouter.ai/api/v1/images', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${state.apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': window.location.origin,
+            'X-Title': 'Imagen Internal Tool'
+        },
+        body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error?.message || `API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.usage && Number.isFinite(data.usage.cost)) {
+        meta.cost = data.usage.cost;
+    }
+    const first = data.data && data.data[0];
+    if (!first) {
+        throw new Error('No image in response. Check console for full API response.');
+    }
+    console.log('API Response:', JSON.stringify(data).slice(0, 2000));
+    if (first.b64_json) {
+        return `data:${first.media_type || 'image/png'};base64,${first.b64_json}`;
+    }
+    if (first.url) {
+        return first.url;
+    }
+    throw new Error('No image in response. Check console for full API response.');
+}
+
 async function generateSingleImage(prompt, modelId, modelConfig, settings, meta = {}) {
+    if (modelConfig.imageOnly) {
+        return generateImageOnly(prompt, modelId, modelConfig, settings, meta);
+    }
     // Build message content
     const content = [];
 
